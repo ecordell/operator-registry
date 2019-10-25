@@ -22,6 +22,7 @@ func NewOpmRegistryCmd() *cobra.Command {
 
 	rootCmd.AddCommand(newRegistryServeCmd())
 	rootCmd.AddCommand(BuildCmd())
+	rootCmd.AddCommand(MirrorCmd())
 
 	return rootCmd
 }
