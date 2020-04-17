@@ -2,8 +2,13 @@ package containerdregistry
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/errdefs"
@@ -13,8 +18,6 @@ import (
 	"github.com/containerd/containerd/remotes"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
-	"io"
-	"os"
 
 	"github.com/operator-framework/operator-registry/pkg/image"
 )
@@ -69,12 +72,7 @@ func (r *Registry) Unpack(ctx context.Context, ref image.Reference, dir string) 
 	// Set the default namespace if unset
 	ctx = ensureNamespace(ctx)
 
-	img, err := r.Images().Get(ctx, ref.String())
-	if err != nil {
-		return err
-	}
-
-	manifest, err := images.Manifest(ctx, r.Content(), img.Target, r.platform)
+	manifest, err := r.getManifest(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -93,9 +91,64 @@ func (r *Registry) Unpack(ctx context.Context, ref image.Reference, dir string) 
 	return nil
 }
 
+// Labels gets the labels for an image reference.
+func (r *Registry) Labels(ctx context.Context, ref image.Reference) (map[string]string, error) {
+	// Set the default namespace if unset
+	ctx = ensureNamespace(ctx)
+
+	manifest, err := r.getManifest(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	imageConfig, err := r.getImage(ctx, *manifest)
+	if err != nil {
+		return nil, err
+	}
+
+	return imageConfig.Config.Labels, nil
+}
+
 // Destroy cleans up the on-disk boltdb file and other cache files, unless preserve cache is true
 func (r *Registry) Destroy() (err error) {
 	return r.destroy()
+}
+
+func (r *Registry) getManifest(ctx context.Context, ref image.Reference) (*ocispec.Manifest, error) {
+	img, err := r.Images().Get(ctx, ref.String())
+	if err != nil {
+		return nil, err
+	}
+
+	manifest, err := images.Manifest(ctx, r.Content(), img.Target, r.platform)
+	if err != nil {
+		return nil, err
+	}
+	return &manifest, nil
+}
+
+func (r *Registry) getImage(ctx context.Context, manifest ocispec.Manifest) (*ocispec.Image, error) {
+	ra, err := r.Content().ReaderAt(ctx, manifest.Config)
+	if err != nil {
+		return nil, err
+	}
+	defer ra.Close()
+
+	decompressed, err := compression.DecompressStream(io.NewSectionReader(ra, 0, ra.Size()))
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, decompressed); err != nil {
+		return nil, err
+	}
+	r.log.Warn(buf.String())
+
+	var imageConfig ocispec.Image
+
+	if err := json.Unmarshal(buf.Bytes(), &imageConfig); err != nil {
+		return nil, err
+	}
+	return &imageConfig, nil
 }
 
 func (r *Registry) fetch(ctx context.Context, fetcher remotes.Fetcher, root ocispec.Descriptor) error {
